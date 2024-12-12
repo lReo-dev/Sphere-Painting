@@ -1,0 +1,122 @@
+#pragma kernel CSMain
+
+#define EPS 0.01
+#define MAX_DISTANCE 1000
+
+RWTexture2D<float4> Result;
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+float4 _DirectionalLight;
+float2 _ClipRange;
+
+struct Sphere {
+    float3 position;
+    float radius;
+};
+
+StructuredBuffer<Sphere> _Spheres;
+
+struct Ray
+{
+    float3 origin;
+    float3 direction;
+};
+
+Ray CreateRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    return ray;
+}
+
+Ray CreateCameraRay(float2 uv)
+{
+    float3 origin = mul(_CameraToWorld, float4(0.0, 0.0, 0.0, 1.0)).xyz;
+    float3 direction = mul(_CameraInverseProjection, float4(uv, 0.0, 1.0)).xyz;
+    direction = mul(_CameraToWorld, float4(direction, 0.0)).xyz;
+    direction = normalize(direction);
+    return CreateRay(origin, direction);
+}
+
+float3 RayAt(Ray ray, float t)
+{
+    return ray.origin + ray.direction * t;
+}
+
+struct RayHit
+{
+    float3 position;
+    float distance;
+    float3 normal;
+};
+
+RayHit CreateRayHit()
+{
+    RayHit hit;
+    hit.position = float3(0.0, 0.0, 0.0);
+    hit.distance = 1.#INF;
+    hit.normal = float3(0.0, 0.0, 0.0);
+    return hit;
+}
+
+float GetSphereDistance(float3 pos, Sphere sphere)
+{
+    return length(pos - sphere.position) - sphere.radius;
+}
+
+float GetSceneDistance(float3 pos)
+{
+    float minDist = 1.#INF;
+    uint numSpheres, stride;
+    _Spheres.GetDimensions(numSpheres, stride);
+    for(uint i = 0; i < numSpheres; ++i)
+    {
+        float dist = GetSphereDistance(pos, _Spheres[i]);
+        minDist = min(minDist, dist);
+    }
+    return minDist;
+}
+
+float3 EstimateNormal(float3 pos) {
+    float dx = GetSceneDistance(float3(pos.x+EPS,pos.y,pos.z)) - GetSceneDistance(float3(pos.x-EPS,pos.y,pos.z));
+    float dy = GetSceneDistance(float3(pos.x,pos.y+EPS,pos.z)) - GetSceneDistance(float3(pos.x,pos.y-EPS,pos.z));
+    float dz = GetSceneDistance(float3(pos.x,pos.y,pos.z+EPS)) - GetSceneDistance(float3(pos.x,pos.y,pos.z-EPS));
+    return normalize(float3(dx, dy, dz));
+}
+
+RayHit Trace(Ray ray)
+{    
+    RayHit rayHit = CreateRayHit();
+    float rayDist = _ClipRange.x;
+    while(rayDist < _ClipRange.y && rayDist < MAX_DISTANCE)
+    {
+        float3 curPos = RayAt(ray, rayDist);
+        float sceneDist = GetSceneDistance(curPos);
+        if(sceneDist < EPS)
+        {
+            rayHit.position = curPos;
+            rayHit.normal = EstimateNormal(curPos - ray.direction * EPS);
+            rayHit.distance = rayDist;
+            break;
+        }
+        rayDist += sceneDist;
+    }
+    return rayHit;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Result.GetDimensions(width, height);
+    float2 uv = float2(id.xy / float2(width, height) * 2.0 - 1.0);
+    Ray cameraRay = CreateCameraRay(uv);
+    RayHit rayHit = Trace(cameraRay);
+    float3 result = float3(0.0, 0.0, 0.0);
+    if(rayHit.distance < 1.#INF)
+    {
+        result = rayHit.normal;
+    }
+    Result[id.xy] = float4(result.x, result.y, result.z, 1.0);
+}
